@@ -65,9 +65,12 @@ class TouFlags:
     peak: Optional[np.ndarray]
     standard: Optional[np.ndarray]
     offpeak: Optional[np.ndarray]
+    allow_discharge: Optional[np.ndarray]
     source: str
 
     def discharge_allowed(self, index: int) -> bool:
+        if self.allow_discharge is not None:
+            return bool(self.allow_discharge[index])
         if self.peak is None or self.standard is None:
             return True
         return bool(self.peak[index] or self.standard[index])
@@ -191,13 +194,29 @@ def load_excel_inputs(file_path: Path) -> Dict[str, Optional[pd.DataFrame]]:
 
 
 def extract_bess_parameters(assumption_df: Optional[pd.DataFrame]) -> BESSParameters:
-    capacity_kwh = DEFAULT_BESS_CAPACITY_KWH
+    total_capacity_kwh = DEFAULT_BESS_CAPACITY_KWH
+    usable_capacity_kwh: Optional[float] = None
+    dod: Optional[float] = None
     power_kw = DEFAULT_BESS_POWER_KW
     efficiency = DEFAULT_BESS_EFFICIENCY
     augmentation_kwh = DEFAULT_AUGMENTATION_KWH
 
     if assumption_df is None:
-        return BESSParameters(capacity_kwh, power_kw, efficiency, augmentation_kwh)
+        return BESSParameters(total_capacity_kwh, power_kw, efficiency, augmentation_kwh)
+
+    def find_value_by_keywords(keywords: List[str]) -> Optional[float]:
+        for _, row in assumption_df.iterrows():
+            row_values = row.tolist()
+            for idx, cell in enumerate(row_values):
+                if not isinstance(cell, str):
+                    continue
+                label_norm = normalize_text(cell)
+                if all(key in label_norm for key in keywords):
+                    value = first_numeric(row_values[idx + 1 :])
+                    if value is None:
+                        value = first_numeric(row_values[:idx])
+                    return value
+        return None
 
     for _, row in assumption_df.iterrows():
         label = row.iloc[0]
@@ -207,15 +226,68 @@ def extract_bess_parameters(assumption_df: Optional[pd.DataFrame]) -> BESSParame
         value = first_numeric(row.iloc[1:].tolist())
         if value is None:
             continue
+        if "dod" in label_norm:
+            dod = value / 100.0 if value > 1.5 else value
+            continue
+        if "usable" in label_norm and "capacity" in label_norm:
+            usable_capacity_kwh = value
+            continue
         if "bess" in label_norm or "battery" in label_norm:
             if "capacity" in label_norm and "kw" not in label_norm:
-                capacity_kwh = value
+                if "usable" in label_norm:
+                    usable_capacity_kwh = value
+                elif "total" in label_norm or "storage" in label_norm:
+                    total_capacity_kwh = value
+                elif "standard" not in label_norm:
+                    total_capacity_kwh = value
             elif "power" in label_norm or "mw" in label_norm or "kw" in label_norm:
                 power_kw = value
             elif "efficiency" in label_norm:
                 efficiency = value
+            elif "dod" in label_norm:
+                dod = value
             elif "augmentation" in label_norm or "replacement" in label_norm:
                 augmentation_kwh = value
+
+    if dod is None:
+        dod = find_value_by_keywords(["dod"])
+        if dod is not None and dod > 1.5:
+            dod /= 100.0
+    if usable_capacity_kwh is None:
+        usable_capacity_kwh = (
+            find_value_by_keywords(["usable", "bess", "capacity"])
+            or find_value_by_keywords(["usable", "capacity"])
+        )
+    if total_capacity_kwh == DEFAULT_BESS_CAPACITY_KWH:
+        total_capacity_kwh = (
+            find_value_by_keywords(["total", "bess", "storage", "capacity"])
+            or find_value_by_keywords(["total", "bess", "capacity"])
+            or find_value_by_keywords(["total", "storage", "capacity"])
+            or total_capacity_kwh
+        )
+    if power_kw == DEFAULT_BESS_POWER_KW:
+        power_kw = (
+            find_value_by_keywords(["total", "bess", "power", "output"])
+            or find_value_by_keywords(["total", "power", "output"])
+            or power_kw
+        )
+    if efficiency == DEFAULT_BESS_EFFICIENCY:
+        efficiency = (
+            find_value_by_keywords(["halfcycle", "efficiency"])
+            or find_value_by_keywords(["half", "cycle", "efficiency"])
+            or find_value_by_keywords(["bess", "efficiency"])
+            or efficiency
+        )
+
+    if usable_capacity_kwh is not None:
+        capacity_kwh = usable_capacity_kwh
+    elif dod is not None:
+        capacity_kwh = total_capacity_kwh * dod
+    else:
+        capacity_kwh = total_capacity_kwh
+
+    if augmentation_kwh == DEFAULT_AUGMENTATION_KWH and capacity_kwh != DEFAULT_BESS_CAPACITY_KWH:
+        augmentation_kwh = capacity_kwh
 
     return BESSParameters(capacity_kwh, power_kw, efficiency, augmentation_kwh)
 
@@ -298,16 +370,23 @@ def extract_demand_target(calc_df: Optional[pd.DataFrame]) -> Optional[float]:
 
 def extract_tou_flags(calc_df: Optional[pd.DataFrame], hours: int) -> TouFlags:
     if calc_df is None:
-        return TouFlags(None, None, None, "calc sheet missing")
+        return TouFlags(None, None, None, None, "calc sheet missing")
 
     columns = calc_df.columns.tolist()
+    allow_col = find_column(columns, ["AllowDischarge", "Allow Discharge", "Allow_Discharge"])
+    allow = to_bool(calc_df[allow_col]) if allow_col else None
     time_flag_col = find_column(columns, ["TimePeriodFlag", "Time Period Flag", "Time Period"])
     if time_flag_col:
         flags = calc_df[time_flag_col].astype(str).str.upper().fillna("N").to_numpy()
         peak = flags == "P"
         standard = flags == "N"
         offpeak = flags == "O"
-        return TouFlags(peak, standard, offpeak, f"timeperiod={time_flag_col}")
+        source = f"timeperiod={time_flag_col}"
+        if allow_col:
+            source = f"{source}, allow={allow_col}"
+        if allow is not None and len(allow) != hours:
+            allow = None
+        return TouFlags(peak, standard, offpeak, allow, source)
 
     exclude = ["start", "end", "min", "hour", "time"]
     peak_col = pick_flag_column(columns, ["peak"], exclude)
@@ -319,14 +398,18 @@ def extract_tou_flags(calc_df: Optional[pd.DataFrame], hours: int) -> TouFlags:
     offpeak = to_bool(calc_df[offpeak_col]) if offpeak_col else None
 
     source = f"peak={peak_col}, standard={standard_col}, offpeak={offpeak_col}"
+    if allow_col:
+        source = f"{source}, allow={allow_col}"
     if peak is not None and len(peak) != hours:
         peak = None
     if standard is not None and len(standard) != hours:
         standard = None
     if offpeak is not None and len(offpeak) != hours:
         offpeak = None
+    if allow is not None and len(allow) != hours:
+        allow = None
 
-    return TouFlags(peak, standard, offpeak, source)
+    return TouFlags(peak, standard, offpeak, allow, source)
 
 
 def extract_degradation_factors(loss_df: Optional[pd.DataFrame], other_df: Optional[pd.DataFrame]) -> Tuple[List[float], List[float]]:
@@ -490,7 +573,11 @@ def extract_calc_truth(calc_df: Optional[pd.DataFrame]) -> Tuple[Dict[str, float
         return {}, ["Calc sheet not found; skipping hourly validation."]
 
     columns = calc_df.columns.tolist()
-    solar_col = find_column(columns, ["DirectPVConsumption_kW", "Direct PV Consumption", "Solar Supply"])
+    solar_col = find_column(columns, ["SolarGen_kW", "SolarGen", "Solar Generation"])
+    if solar_col is None:
+        solar_col = find_column(columns, ["DirectPVConsumption_kW", "Direct PV Consumption", "Solar Supply"])
+        if solar_col:
+            warnings.append("SolarGen column not found in Calc; using Direct PV Consumption.")
     load_col = find_column(columns, ["Load_kW", "Load", "Demand"])
     discharge_col = find_column(columns, ["DischargeEnergy_kWh", "Discharge Energy", "BESS Discharge"])
     grid_export_col = find_column(
@@ -547,37 +634,34 @@ def simulate_direct_clone(
     current_soc = 0.0
 
     for hour in range(hours):
-        net_load_after_solar = load_kw[hour] - solar_kw[hour]
+        net_load_after_solar = solar_kw[hour] - load_kw[hour]
 
-        if solar_kw[hour] > 0 and load_kw[hour] > 0:
-            excess_solar_available = min(solar_kw[hour], load_kw[hour])
+        if solar_kw[hour] > load_kw[hour]:
+            excess_solar_available = solar_kw[hour] - load_kw[hour]
         else:
             excess_solar_available = 0.0
 
         headroom = bess_params.capacity_kwh - current_soc
-        charge_limit_kw = min(bess_params.power_kw, headroom)
+        charge_limit_kwh = min(bess_params.power_kw, headroom / bess_params.efficiency)
 
         if excess_solar_available > 0 and headroom > 0:
-            available_charge_kw = min(excess_solar_available, charge_limit_kw)
+            available_charge_kw = min(excess_solar_available, charge_limit_kwh)
             charge_kwh[hour] = available_charge_kw
             current_soc += charge_kwh[hour] * bess_params.efficiency
 
         discharge_allowed = tou_flags.discharge_allowed(hour)
-        if demand_target_kw is not None:
-            discharge_allowed = discharge_allowed and load_kw[hour] > demand_target_kw
-
-        if discharge_allowed and current_soc > 0:
-            required_kw = net_load_after_solar - (demand_target_kw or 0.0)
-            required_kw = max(required_kw, 0.0)
-            discharge = min(required_kw, bess_params.power_kw, current_soc)
+        if discharge_allowed and net_load_after_solar <= 0 and current_soc > 0:
+            required_kw = max(-net_load_after_solar, 0.0)
+            available_kw = current_soc * bess_params.efficiency
+            discharge = min(required_kw, bess_params.power_kw, available_kw)
             discharge_kw[hour] = discharge
-            current_soc -= discharge
+            current_soc -= discharge / bess_params.efficiency
 
         current_soc = max(0.0, min(current_soc, bess_params.capacity_kwh))
         soc_kwh[hour] = current_soc
 
     grid_load_kw = np.maximum(load_kw - solar_kw - discharge_kw, 0.0)
-    grid_export_kw = compute_grid_export_excel_bug(solar_kw, load_kw)
+    grid_export_kw = compute_grid_export_physical(solar_kw, load_kw, charge_kwh)
 
     return {
         "solar_kw": solar_kw,
@@ -605,28 +689,28 @@ def simulate_peak_conservative(
     current_soc = 0.0
 
     for hour in range(hours):
-        net_load_after_solar = load_kw[hour] - solar_kw[hour]
+        net_load_after_solar = solar_kw[hour] - load_kw[hour]
 
-        if solar_kw[hour] > 0 and load_kw[hour] > 0:
-            excess_solar_available = min(solar_kw[hour], load_kw[hour])
+        if solar_kw[hour] > load_kw[hour]:
+            excess_solar_available = solar_kw[hour] - load_kw[hour]
         else:
             excess_solar_available = 0.0
 
         headroom = bess_params.capacity_kwh - current_soc
-        charge_limit_kw = min(bess_params.power_kw, headroom)
+        charge_limit_kwh = min(bess_params.power_kw, headroom / bess_params.efficiency)
 
         if excess_solar_available > 0 and headroom > 0:
-            available_charge_kw = min(excess_solar_available, charge_limit_kw)
+            available_charge_kw = min(excess_solar_available, charge_limit_kwh)
             charge_kwh[hour] = available_charge_kw
             current_soc += charge_kwh[hour] * bess_params.efficiency
 
         discharge_allowed = tou_flags.peak[hour] if tou_flags.peak is not None else True
-        if discharge_allowed and current_soc > reserve_kwh:
-            required_kw = max(net_load_after_solar, 0.0)
-            available_soc = current_soc - reserve_kwh
+        if discharge_allowed and net_load_after_solar <= 0 and current_soc > reserve_kwh:
+            required_kw = max(-net_load_after_solar, 0.0)
+            available_soc = max(current_soc - reserve_kwh, 0.0) * bess_params.efficiency
             discharge = min(required_kw, bess_params.power_kw, available_soc)
             discharge_kw[hour] = discharge
-            current_soc -= discharge
+            current_soc -= discharge / bess_params.efficiency
 
         current_soc = max(0.0, min(current_soc, bess_params.capacity_kwh))
         soc_kwh[hour] = current_soc
