@@ -30,6 +30,38 @@ def load_excel_ebitda(excel_path: Path) -> List[float]:
     return ebitda_values
 
 
+def load_excel_net_fcfe(excel_path: Path) -> List[float]:
+    """Load Net FCFE values (row 187, K..AJ) from Excel Financial sheet."""
+    from openpyxl import load_workbook
+
+    wb = load_workbook(excel_path, data_only=True)
+    ws = wb["Financial"]
+    net_fcfe_values = []
+    for col in range(11, 36):  # Columns K to AJ
+        val = ws.cell(row=187, column=col).value
+        if isinstance(val, (int, float)):
+            net_fcfe_values.append(float(val))
+        else:
+            net_fcfe_values.append(0.0)
+    return net_fcfe_values
+
+
+def load_excel_dates(excel_path: Path) -> List[pd.Timestamp]:
+    """Load date series (row 6, K..AJ) from Excel Financial sheet."""
+    from openpyxl import load_workbook
+
+    wb = load_workbook(excel_path, data_only=True)
+    ws = wb["Financial"]
+    date_values = []
+    for col in range(11, 36):  # Columns K to AJ
+        val = ws.cell(row=6, column=col).value
+        if val is not None:
+            date_values.append(pd.to_datetime(val))
+        else:
+            date_values.append(None)
+    return date_values
+
+
 @dataclass
 class FinancialConfig:
     """Financial model configuration."""
@@ -140,6 +172,23 @@ def calculate_npv(cash_flows: np.ndarray, discount_rate: float) -> float:
     return float(np.sum(cash_flows / (1 + discount_rate) ** years))
 
 
+def calculate_xnpv(cash_flows: np.ndarray, dates: List[pd.Timestamp], discount_rate: float) -> float:
+    """Calculate XNPV using actual dates."""
+    if len(cash_flows) == 0 or len(dates) == 0:
+        return 0.0
+    base_date = next((d for d in dates if d is not None), None)
+    if base_date is None:
+        return calculate_npv(cash_flows, discount_rate)
+
+    npv = 0.0
+    for cf, dt in zip(cash_flows, dates):
+        if dt is None:
+            continue
+        days = (dt - base_date).days
+        npv += cf / (1 + discount_rate) ** (days / 365.0)
+    return float(npv)
+
+
 def calculate_payback(cumulative_cash_flows: np.ndarray) -> float:
     """Calculate payback period in years."""
     positive_idx = np.where(cumulative_cash_flows >= 0)[0]
@@ -155,6 +204,8 @@ def run_financial_model(
     tax_holiday: Optional[TaxHoliday] = None,
     mra: Optional[MRASchedule] = None,
     excel_ebitda: Optional[List[float]] = None,
+    excel_net_fcfe: Optional[List[float]] = None,
+    excel_dates: Optional[List[pd.Timestamp]] = None,
 ) -> FinancialResults:
     """Run financial model and calculate IRR/NPV.
 
@@ -165,6 +216,8 @@ def run_financial_model(
         tax_holiday: Optional TaxHoliday schedule
         mra: Optional MRASchedule for BESS augmentation
         excel_ebitda: Optional list of EBITDA values from Excel (for exact match)
+        excel_net_fcfe: Optional list of Net FCFE values from Excel (for exact NPV)
+        excel_dates: Optional list of dates for XNPV
 
     Returns:
         FinancialResults with yearly cash flows and IRR/NPV.
@@ -291,7 +344,14 @@ def run_financial_model(
     # Calculate metrics
     project_irr = calculate_irr(project_cf)
     equity_irr = calculate_irr(equity_cf)
-    npv = calculate_npv(project_cf, cfg.discount_rate)
+    # Excel NPV uses XNPV on Net FCFE (row 187, K..AJ)
+    if excel_net_fcfe is not None and excel_dates is not None:
+        npv = calculate_xnpv(np.array(excel_net_fcfe), excel_dates, cfg.discount_rate)
+    else:
+        net_fcfe_for_npv = equity_cf[1:].copy()
+        if len(net_fcfe_for_npv) > 0:
+            net_fcfe_for_npv[0] -= equity_amount
+        npv = calculate_npv(net_fcfe_for_npv, cfg.discount_rate)
 
     cumulative_fcfe = np.cumsum(equity_cf)
     payback = calculate_payback(cumulative_fcfe)
