@@ -71,19 +71,22 @@ class TaxHoliday:
 
 @dataclass
 class MRASchedule:
-    """Maintenance Reserve Account buildup for BESS augmentation."""
-    augmentation_years: List[int] = field(default_factory=lambda: [11, 22])
-    buildup_schedule: List[float] = field(default_factory=lambda: [0.10, 0.30, 0.30, 0.30])
+    """Maintenance Reserve Account buildup for BESS augmentation.
+    
+    Excel uses fixed MRA amounts, not percentage of augmentation cost.
+    Total MRA = $3,027,000 spread over Years 8-11.
+    """
+    # Fixed MRA contributions by year (from Excel row 103)
+    mra_by_year: Dict[int, float] = field(default_factory=lambda: {
+        8: 908_100,
+        9: 908_100,
+        10: 908_100,
+        11: 302_700,
+    })
 
-    def get_annual_contribution(self, year: int, augmentation_cost: float) -> float:
+    def get_annual_contribution(self, year: int, augmentation_cost: float = 0.0) -> float:
         """Calculate MRA contribution for a given year."""
-        for aug_year in self.augmentation_years:
-            buildup_start = aug_year - len(self.buildup_schedule)
-            if buildup_start < year <= aug_year:
-                idx = year - buildup_start - 1
-                if 0 <= idx < len(self.buildup_schedule):
-                    return augmentation_cost * self.buildup_schedule[idx]
-        return 0.0
+        return self.mra_by_year.get(year, 0.0)
 
 
 @dataclass
@@ -167,6 +170,9 @@ def run_financial_model(
     # BESS augmentation cost (assume same as initial BESS cost)
     augmentation_cost = cfg.bess_cost_usd
 
+    # Initialize debt balance for tracking principal payments
+    debt_balance = debt_amount
+
     for year in range(1, years + 1):
         # Revenue (from lifetime results)
         if year <= len(lifetime_results):
@@ -186,10 +192,10 @@ def run_financial_model(
             cfg.other_opex_usd + cfg.land_lease_usd
         ) * opex_factor
 
-        # MRA contribution
+        # MRA contribution (included in OPEX per Excel)
         mra_contribution = mra.get_annual_contribution(year, augmentation_cost)
 
-        # EBITDA
+        # EBITDA (after MRA, matching Excel)
         ebitda = revenue - total_opex - mra_contribution
 
         # Depreciation
@@ -211,14 +217,22 @@ def run_financial_model(
         # Debt service using DSCR sculpting: DS = CFADS / target_DSCR
         if year <= cfg.debt_tenor_years and cfads > 0:
             debt_service = cfads / cfg.target_dscr
+            # Split into interest and principal
+            interest_payment = debt_balance * cfg.interest_rate
+            principal_payment = debt_service - interest_payment
+            # Ensure principal doesn't exceed remaining balance
+            principal_payment = min(principal_payment, debt_balance)
+            debt_balance -= principal_payment
         else:
             debt_service = 0.0
+            interest_payment = 0.0
+            principal_payment = 0.0
 
-        # Dividends = CFADS - Debt Service (Excel approach)
-        # This is what flows to equity holders after debt service
-        dividends = max(cfads - debt_service, 0.0)
+        # Excel dividend formula: Dividend = CFADS + Principal - Interest
+        # This gives equity holders the benefit of principal repayment
+        dividends = cfads + principal_payment - interest_payment
 
-        # Free cash flow to equity (for backward compatibility)
+        # Free cash flow to equity
         fcfe = dividends
 
         yearly_data.append({

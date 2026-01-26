@@ -121,7 +121,10 @@ def load_financial_config(file_path: Path) -> FinancialConfig:
     bess_mwh = get_val(18, 10, 66.0)
 
     # Get debt parameters from Financial sheet
-    interest_rate = get_fin_val(160, 6, 0.02)  # All-in Interest Rate
+    # All-in Interest Rate = Base Rate (2%) + Margin (6.5%) = 8.5%
+    base_rate = get_fin_val(160, 6, 0.02)  # G161 = 0.02
+    margin = get_fin_val(158, 6, 0.065)    # G159 = 0.065 (Fix Swap Rate)
+    interest_rate = base_rate + margin     # 8.5%
     leverage_ratio = 24_584_997 / 49_513_200  # From Excel debt balance
 
     return FinancialConfig(
@@ -136,7 +139,7 @@ def load_financial_config(file_path: Path) -> FinancialConfig:
         other_opex_usd=161_440,
         land_lease_usd=0,
         leverage_ratio=leverage_ratio,
-        debt_tenor_years=15,
+        debt_tenor_years=10,  # Excel uses 10-year debt tenor
         interest_rate=interest_rate,
         discount_rate=0.10,
     )
