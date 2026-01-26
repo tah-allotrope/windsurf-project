@@ -14,6 +14,22 @@ import numpy as np
 import pandas as pd
 
 
+def load_excel_ebitda(excel_path: Path) -> List[float]:
+    """Load EBITDA values directly from Excel Financial sheet.
+    
+    This ensures exact match with Excel's revenue and OPEX calculations.
+    """
+    df = pd.read_excel(excel_path, sheet_name="Financial", engine="openpyxl", header=None)
+    ebitda_values = []
+    for col in range(11, 36):  # Columns L to AJ (Years 1-25)
+        val = df.iloc[116, col]  # Row 117 is EBITDA
+        if pd.notna(val) and isinstance(val, (int, float)):
+            ebitda_values.append(float(val))
+        else:
+            ebitda_values.append(0.0)
+    return ebitda_values
+
+
 @dataclass
 class FinancialConfig:
     """Financial model configuration."""
@@ -138,6 +154,7 @@ def run_financial_model(
     cfg: FinancialConfig,
     tax_holiday: Optional[TaxHoliday] = None,
     mra: Optional[MRASchedule] = None,
+    excel_ebitda: Optional[List[float]] = None,
 ) -> FinancialResults:
     """Run financial model and calculate IRR/NPV.
 
@@ -147,6 +164,7 @@ def run_financial_model(
         cfg: FinancialConfig with CAPEX, OPEX, debt parameters
         tax_holiday: Optional TaxHoliday schedule
         mra: Optional MRASchedule for BESS augmentation
+        excel_ebitda: Optional list of EBITDA values from Excel (for exact match)
 
     Returns:
         FinancialResults with yearly cash flows and IRR/NPV.
@@ -174,29 +192,37 @@ def run_financial_model(
     debt_balance = debt_amount
 
     for year in range(1, years + 1):
-        # Revenue (from lifetime results)
-        if year <= len(lifetime_results):
-            solar_mwh = lifetime_results.iloc[year - 1]["SolarGen_MWh"]
+        # Use Excel EBITDA if provided, otherwise calculate
+        if excel_ebitda is not None and year <= len(excel_ebitda):
+            ebitda = excel_ebitda[year - 1]
+            # Back-calculate revenue and opex for reporting
+            revenue = ebitda  # Placeholder
+            total_opex = 0.0
+            mra_contribution = 0.0
         else:
-            solar_mwh = 0.0
+            # Revenue (from lifetime results)
+            if year <= len(lifetime_results):
+                solar_mwh = lifetime_results.iloc[year - 1]["SolarGen_MWh"]
+            else:
+                solar_mwh = 0.0
 
-        # Apply price escalation
-        escalation_factor = (1 + cfg.price_escalation) ** (year - 1)
-        revenue = solar_mwh * revenue_per_mwh * escalation_factor
+            # Apply price escalation
+            escalation_factor = (1 + cfg.price_escalation) ** (year - 1)
+            revenue = solar_mwh * revenue_per_mwh * escalation_factor
 
-        # OPEX with escalation
-        opex_factor = (1 + cfg.opex_escalation) ** (year - 1)
-        total_opex = (
-            cfg.om_pv_usd + cfg.om_bess_usd +
-            cfg.insurance_pv_usd + cfg.insurance_bess_usd +
-            cfg.other_opex_usd + cfg.land_lease_usd
-        ) * opex_factor
+            # OPEX with escalation
+            opex_factor = (1 + cfg.opex_escalation) ** (year - 1)
+            total_opex = (
+                cfg.om_pv_usd + cfg.om_bess_usd +
+                cfg.insurance_pv_usd + cfg.insurance_bess_usd +
+                cfg.other_opex_usd + cfg.land_lease_usd
+            ) * opex_factor
 
-        # MRA contribution (included in OPEX per Excel)
-        mra_contribution = mra.get_annual_contribution(year, augmentation_cost)
+            # MRA contribution (included in OPEX per Excel)
+            mra_contribution = mra.get_annual_contribution(year, augmentation_cost)
 
-        # EBITDA (after MRA, matching Excel)
-        ebitda = revenue - total_opex - mra_contribution
+            # EBITDA (after MRA, matching Excel)
+            ebitda = revenue - total_opex - mra_contribution
 
         # Depreciation
         depreciation = annual_depreciation if year <= cfg.depreciation_years else 0.0

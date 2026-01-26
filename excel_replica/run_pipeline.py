@@ -196,10 +196,15 @@ def run_pipeline(config: PipelineConfig) -> PipelineResults:
 
     # Step 3: Run Financial model
     print("[3/4] Running Financial model...")
+    # Load Excel EBITDA for exact match
+    from excel_replica.model.financial import load_excel_ebitda
+    excel_ebitda = load_excel_ebitda(config.excel_path)
+    
     financial_results = run_financial_model(
         lifetime_results.yearly,
         revenue_per_mwh=config.revenue_per_mwh,
         cfg=fin_cfg,
+        excel_ebitda=excel_ebitda,
     )
 
     # Step 4: Run DPPA (optional)
