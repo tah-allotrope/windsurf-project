@@ -1,0 +1,14 @@
+{
+  "name": "scenario_small_scale",
+  "description": "Reduced solar + BESS scale with standard financing",
+  "overrides": [
+    {"sheet": "Assumption", "cell": "K18", "value": 30.0},
+    {"sheet": "Assumption", "cell": "K19", "value": 40.0},
+    {"sheet": "Assumption", "cell": "K40", "value": 1000000},
+    {"sheet": "Assumption", "cell": "K41", "value": 750000},
+    {"sheet": "Assumption", "cell": "K42", "value": 200000},
+    {"sheet": "Assumption", "cell": "K43", "value": 4000000},
+    {"sheet": "Financial", "cell": "G159", "value": 0.065},
+    {"sheet": "Financial", "cell": "G161", "value": 0.02}
+  ]
+}

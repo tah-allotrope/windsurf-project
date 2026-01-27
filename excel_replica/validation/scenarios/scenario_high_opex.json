@@ -1,0 +1,18 @@
+{
+  "name": "scenario_high_opex",
+  "description": "Higher O&M and insurance with same scale",
+  "overrides": [
+    {"sheet": "Assumption", "cell": "K18", "value": 40.36},
+    {"sheet": "Assumption", "cell": "K19", "value": 66.0},
+    {"sheet": "Assumption", "cell": "K40", "value": 1200000},
+    {"sheet": "Assumption", "cell": "K41", "value": 750000},
+    {"sheet": "Assumption", "cell": "K42", "value": 200000},
+    {"sheet": "Assumption", "cell": "K43", "value": 4843200},
+    {"sheet": "Assumption", "cell": "K44", "value": 400000},
+    {"sheet": "Assumption", "cell": "K45", "value": 250000},
+    {"sheet": "Assumption", "cell": "K46", "value": 120000},
+    {"sheet": "Assumption", "cell": "K47", "value": 60000},
+    {"sheet": "Financial", "cell": "G159", "value": 0.07},
+    {"sheet": "Financial", "cell": "G161", "value": 0.02}
+  ]
+}
