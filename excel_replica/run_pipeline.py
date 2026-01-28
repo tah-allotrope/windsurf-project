@@ -36,6 +36,7 @@ from excel_replica.model.dppa import (
     calculate_dppa_hourly,
     load_dppa_config_from_excel,
 )
+from excel_replica.utils.excel_reader import ExcelReader
 
 
 @dataclass
@@ -57,32 +58,20 @@ class PipelineResults:
     summary: Dict[str, float] = None
 
 
-def load_calc_config(file_path: Path) -> CalcConfig:
-    """Load BESS and tariff configuration from Assumption sheet."""
-    df = pd.read_excel(file_path, sheet_name="Assumption", engine="openpyxl", header=None)
-
-    def get_value(row_idx: int, col_idx: int = 4) -> float:
-        val = df.iloc[row_idx, col_idx]
-        if pd.notna(val) and isinstance(val, (int, float)):
-            return float(val)
-        for c in [5, 3]:
-            val = df.iloc[row_idx, c]
-            if pd.notna(val) and isinstance(val, (int, float)):
-                return float(val)
-        return 0.0
-
-    total_capacity_kwh = get_value(24)
-    power_kw = get_value(25)
-    dod = get_value(26)
-    efficiency = get_value(27)
-    min_soc = get_value(38)
+def load_calc_config(reader: ExcelReader) -> CalcConfig:
+    """Load BESS and tariff configuration using named ranges."""
+    total_capacity_kwh = reader.get_value("Total_BESS_Storage_Capacity", 66000.0)
+    power_kw = reader.get_value("Total_BESS_Power_Output", 20000.0)
+    dod = reader.get_value("DoD", 0.85)
+    efficiency = reader.get_value("Charge_discharge_efficiency", 0.95)
+    min_soc = reader.get_value("Min_Reserve_SOC", 0.0)
 
     usable_capacity_kwh = total_capacity_kwh * dod
 
-    exchange_rate = df.iloc[8, 10] if pd.notna(df.iloc[8, 10]) else 26000.0
-    ca_normal_vnd = df.iloc[13, 16] if pd.notna(df.iloc[13, 16]) else 1253.0
-    ca_peak_vnd = df.iloc[14, 16] if pd.notna(df.iloc[14, 16]) else 2162.0
-    ca_offpeak_vnd = df.iloc[15, 16] if pd.notna(df.iloc[15, 16]) else 843.0
+    exchange_rate = reader.get_value("Exchange_rate", 25455.0)
+    ca_normal_vnd = reader.get_value("Ca_normal", 1253.0)
+    ca_peak_vnd = reader.get_value("Ca_peak", 2162.0)
+    ca_offpeak_vnd = reader.get_value("Ca_offpeak", 843.0)
 
     ca_normal = float(ca_normal_vnd) / float(exchange_rate)
     ca_peak = float(ca_peak_vnd) / float(exchange_rate)
@@ -100,38 +89,26 @@ def load_calc_config(file_path: Path) -> CalcConfig:
     )
 
 
-def load_financial_config(file_path: Path) -> FinancialConfig:
-    """Load financial configuration from Assumption and Financial sheets."""
-    df = pd.read_excel(file_path, sheet_name="Assumption", engine="openpyxl", header=None)
-    fin_df = pd.read_excel(file_path, sheet_name="Financial", engine="openpyxl", header=None)
+def load_financial_config(reader: ExcelReader) -> FinancialConfig:
+    """Load financial configuration using named ranges."""
+    solar_kwp = reader.get_value("Actual_installation_capacity", 40360.0)
+    solar_mwp = solar_kwp / 1000.0
+    bess_mwh = reader.get_value("Total_BESS_Storage_Capacity", 66000.0) / 1000.0
 
-    def get_val(row: int, col: int, default: float) -> float:
-        val = df.iloc[row, col]
-        if pd.notna(val) and isinstance(val, (int, float)):
-            return float(val)
-        return default
+    # Get debt parameters
+    base_rate = reader.get_value("Debt_Base_Rate", 0.02)
+    margin = reader.get_value("Debt_Margin", 0.065)
+    interest_rate = base_rate + margin
 
-    def get_fin_val(row: int, col: int, default: float) -> float:
-        val = fin_df.iloc[row, col]
-        if pd.notna(val) and isinstance(val, (int, float)):
-            return float(val)
-        return default
-
-    solar_mwp = get_val(17, 10, 40.36)
-    bess_mwh = get_val(18, 10, 66.0)
-
-    # Get debt parameters from Financial sheet
-    # All-in Interest Rate = Base Rate (2%) + Margin (6.5%) = 8.5%
-    base_rate = get_fin_val(160, 6, 0.02)  # G161 = 0.02
-    margin = get_fin_val(158, 6, 0.065)    # G159 = 0.065 (Fix Swap Rate)
-    interest_rate = base_rate + margin     # 8.5%
-    leverage_ratio = 24_584_997 / 49_513_200  # From Excel debt balance
+    debt_size = reader.get_value("Final_Debt_Size", 24_584_997)
+    total_capex = reader.get_value("Total_CAPEX", 49_513_200)
+    leverage_ratio = debt_size / total_capex
 
     return FinancialConfig(
-        land_cost_usd=get_val(39, 10, 1_200_000),
-        bop_cost_usd=get_val(42, 10, 4_843_200),
-        pv_cost_usd=solar_mwp * get_val(40, 10, 750_000),
-        bess_cost_usd=bess_mwh * get_val(41, 10, 200_000),
+        land_cost_usd=reader.get_value("Land_acquisition", 1_200_000),
+        bop_cost_usd=4_843_200, # Handled as fixed in Excel
+        pv_cost_usd=solar_mwp * 750_000,
+        bess_cost_usd=bess_mwh * 200_000,
         om_pv_usd=242_160,
         om_bess_usd=132_000,
         insurance_pv_usd=75_675,
@@ -156,8 +133,11 @@ def run_pipeline(config: PipelineConfig) -> PipelineResults:
     """
     print(f"Loading Excel: {config.excel_path}")
 
+    # Initialize Excel reader
+    reader = ExcelReader(config.excel_path)
+
     # Load Calc sheet data
-    calc_df = pd.read_excel(config.excel_path, sheet_name="Calc", engine="openpyxl")
+    calc_df = reader.get_df("Calc")
 
     datetime_series = pd.to_datetime(calc_df["DateTime"])
     solar_kw = calc_df["SolarGen_kW"].astype(float).to_numpy()
@@ -171,8 +151,8 @@ def run_pipeline(config: PipelineConfig) -> PipelineResults:
         allow_discharge = np.isin(period_flags, ["P", "N"])
 
     # Load configurations
-    calc_cfg = load_calc_config(config.excel_path)
-    fin_cfg = load_financial_config(config.excel_path)
+    calc_cfg = load_calc_config(reader)
+    fin_cfg = load_financial_config(reader)
 
     print(f"BESS: {calc_cfg.bess_capacity_kwh:.0f} kWh, {calc_cfg.bess_power_kw:.0f} kW")
     print(f"CAPEX: ${fin_cfg.land_cost_usd + fin_cfg.bop_cost_usd + fin_cfg.pv_cost_usd + fin_cfg.bess_cost_usd:,.0f}")
@@ -215,7 +195,7 @@ def run_pipeline(config: PipelineConfig) -> PipelineResults:
     dppa_results = None
     if config.run_dppa:
         print("[4/4] Running DPPA pricing...")
-        dppa_cfg = load_dppa_config_from_excel(config.excel_path)
+        dppa_cfg = load_dppa_config_from_excel(reader)
         dppa_results = calculate_dppa_hourly(
             datetime_series, solar_kw, load_kw, period_flags, dppa_cfg, config.voltage_level_kv
         )
@@ -275,10 +255,16 @@ def print_summary(results: PipelineResults) -> None:
 
 def main():
     """Main entry point."""
-    excel_path = Path(__file__).parent.parent / "AUDIT 20251201 40MW Solar ^M BESS Ecoplexus.xlsx"
+    # Find the Excel file in the project root
+    root_dir = Path(__file__).parent.parent
+    excel_files = list(root_dir.glob("*.xlsx"))
 
-    if not excel_path.exists():
-        excel_path = Path(r"C:\Users\tukum\CascadeProjects\windsurf-solar-bess-pilot\AUDIT 20251201 40MW Solar ^M BESS Ecoplexus.xlsx")
+    if not excel_files:
+        print("Error: No Excel file found in the root directory.")
+        return
+
+    # Use the first Excel file found (assuming there's only one audit file)
+    excel_path = excel_files[0]
 
     config = PipelineConfig(
         excel_path=excel_path,

@@ -14,6 +14,7 @@ from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
+from excel_replica.utils.excel_reader import ExcelReader
 
 
 @dataclass
@@ -127,22 +128,11 @@ def calculate_dppa_hourly(
     return DPPAResults(hourly=hourly, totals=totals)
 
 
-def load_dppa_config_from_excel(file_path) -> DPPAConfig:
-    """Load DPPA configuration from Assumption sheet."""
-    import pandas as pd
-    from pathlib import Path
-
-    df = pd.read_excel(file_path, sheet_name="Assumption", engine="openpyxl", header=None)
-
-    def get_val(row: int, col: int, default: float) -> float:
-        val = df.iloc[row, col]
-        if pd.notna(val) and isinstance(val, (int, float)):
-            return float(val)
-        return default
-
+def load_dppa_config_from_excel(reader: ExcelReader) -> DPPAConfig:
+    """Load DPPA configuration using named ranges."""
     return DPPAConfig(
-        strike_price_vnd=get_val(38, 16, 1800.0),
-        pcl_vnd=get_val(49, 16, 163.2),
-        cdppa_adv=get_val(50, 16, 360.14),
-        exchange_rate=get_val(8, 10, 26000.0),
+        strike_price_vnd=reader.get_value("Strike_Price", 1800.0),
+        pcl_vnd=reader.get_value("PCL", 163.2),
+        cdppa_adv=reader.get_value("CDPPAdv", 360.14),
+        exchange_rate=reader.get_value("Exchange_rate", 25455.0),
     )

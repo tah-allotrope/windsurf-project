@@ -58,6 +58,7 @@ def compare_metrics(
     metric_tolerances = {
         "project_irr": 0.10,  # 10% for IRR
         "equity_irr": 0.10,   # 10% for IRR
+        "excel_equity_irr_calc": 0.10, # 10% for IRR
         "npv_usd": 1.0,       # NPV can vary significantly due to discount rate
     }
     
@@ -204,6 +205,7 @@ def run_audit(excel_path: Path, output_path: Path = None) -> Tuple[List[Comparis
         "equity_irr": results.financial.equity_irr,
         "npv_usd": results.financial.npv,
         "total_capex": 49_513_200,  # From config
+        "excel_equity_irr_calc": results.financial.equity_irr,
     }
 
     # Load Excel truth
@@ -220,8 +222,16 @@ def run_audit(excel_path: Path, output_path: Path = None) -> Tuple[List[Comparis
 
 def main():
     """Main entry point."""
-    excel_path = Path(r"C:\Users\tukum\CascadeProjects\windsurf-solar-bess-pilot\AUDIT 20251201 40MW Solar ^M BESS Ecoplexus.xlsx")
-    output_path = Path(r"C:\Users\tukum\CascadeProjects\windsurf-solar-bess-pilot\excel_replica\outputs\audit_report.md")
+    # Find the Excel file in the project root
+    root_dir = Path(__file__).parent.parent.parent
+    excel_files = list(root_dir.glob("*.xlsx"))
+
+    if not excel_files:
+        print("Error: No Excel file found in the root directory.")
+        return
+
+    excel_path = excel_files[0]
+    output_path = Path(__file__).parent / "audit_report.md"
 
     comparisons, report = run_audit(excel_path, output_path)
 

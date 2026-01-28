@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import numpy_financial as npf
 
 
 def load_excel_ebitda(excel_path: Path) -> List[float]:
@@ -148,22 +149,17 @@ class FinancialResults:
 
 
 def calculate_irr(cash_flows: np.ndarray) -> float:
-    """Calculate IRR using numpy_financial or fallback."""
+    """Calculate Internal Rate of Return (IRR)."""
+    if np.all(cash_flows >= 0) or np.all(cash_flows <= 0):
+        return 0.0
+
     try:
-        import numpy_financial as npf
-        return float(npf.irr(cash_flows))
-    except ImportError:
-        # Fallback: use scipy or simple Newton-Raphson
-        from scipy.optimize import brentq
-
-        def npv_func(r):
-            years = np.arange(len(cash_flows))
-            return np.sum(cash_flows / (1 + r) ** years)
-
-        try:
-            return float(brentq(npv_func, -0.99, 10.0))
-        except (ValueError, RuntimeError):
+        irr = float(npf.irr(cash_flows))
+        if np.isnan(irr):
             return 0.0
+        return irr
+    except Exception:
+        return 0.0
 
 
 def calculate_npv(cash_flows: np.ndarray, discount_rate: float) -> float:
